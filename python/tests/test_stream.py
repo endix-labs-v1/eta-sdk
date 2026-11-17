@@ -260,3 +260,75 @@ def test_subscribe_and_unsubscribe_are_kept_for_the_next_connection(client: EtaC
 async def ws_close_current(ws: MockStream) -> None:
     for conn in list(ws.sockets):
         await conn.close(1012, "restart")
+
+
+# ---------- Bugbot on PR #1 (found in the TypeScript stream; checked here too) ----------
+
+def frames_of(ws: MockStream, n: int) -> List[str]:
+    return [f["type"] for m, f in ws.frames if m == n]
+
+
+def test_closing_on_ready_starts_no_ping_and_sends_nothing_more(client: EtaClient, log: Log) -> None:
+    async def test(ws: MockStream) -> None:
+        stream = make(client, ws, AsyncSleeps(), ping_interval=0.02)
+        async for frame in stream:
+            if frame["type"] == "ready":
+                await stream.close()
+        await asyncio.sleep(0.2)
+        assert frames_of(ws, 1) == ["auth"], "no subscribe and no ping after close()"
+
+    run(test, log)
+
+
+def test_closing_on_resync_starts_no_ping_and_sends_nothing_more(client: EtaClient, log: Log) -> None:
+    async def drop(sock: Any) -> None:
+        await sock.close(1012, "restart")
+
+    async def test(ws: MockStream) -> None:
+        ws.after_subscribe[1] = drop
+        stream = make(client, ws, AsyncSleeps(), ping_interval=0.02)
+        async for frame in stream:
+            if frame["type"] == "resync":
+                await stream.close()
+        await asyncio.sleep(0.2)
+        assert frames_of(ws, 2) == ["auth"], "no subscribe and no ping after close()"
+
+    run(test, log)
+
+
+def test_a_handshake_that_never_answers_times_out_then_connects_again(client: EtaClient, log: Log) -> None:
+    async def test(_: MockStream) -> None:
+        held: List[Any] = []
+
+        async def hold(reader: Any, writer: Any) -> None:  # takes the TCP connection, never answers the upgrade
+            held.append(writer)
+            await asyncio.sleep(30)
+
+        silent = await asyncio.start_server(hold, "127.0.0.1", 0)
+        port = silent.sockets[0].getsockname()[1]
+        try:
+            stream = client.stream(url=f"ws://127.0.0.1:{port}/stream", sleep=AsyncSleeps(),
+                                   connect_options={"open_timeout": 0.2})
+            frames = await asyncio.wait_for(take(stream.__aiter__(), 2), timeout=3)
+            assert frames[0] == {"type": "closed", "code": None, "err": "open timeout", "wait": 1.0}
+            assert frames[1]["type"] == "closed" and len(held) >= 2, "it connected again"
+            await stream.close()
+        finally:
+            for w in held:
+                w.close()
+            silent.close()
+
+    run(test, log)
+
+
+def test_a_stream_that_opens_but_never_answers_the_key_times_out(client: EtaClient, log: Log) -> None:
+    async def test(ws: MockStream) -> None:
+        ws.silent.add(1)
+        stream = make(client, ws, AsyncSleeps(), connect_options={"open_timeout": 0.2})
+        frames = await asyncio.wait_for(take(stream.__aiter__(), 2), timeout=3)
+        assert frames == [{"type": "closed", "code": None, "err": "open timeout", "wait": 1.0},
+                          {"type": "ready", "handle": "yourhandle"}]
+        assert ws.connections == 2
+        await stream.close()
+
+    run(test, log)

@@ -178,6 +178,8 @@ What it does for you:
 
 - It sends your key in the first frame, never in the URL, then subscribes.
 - It pings every 30 seconds. eta closes a stream that sends nothing for 60.
+- If the stream hasn't opened and had eta's `ready` within 10 seconds, it drops it and connects again
+  (`open_timeout` / `openTimeoutMs`). A handshake that never answers can't hold it for good.
 - When the stream drops, it connects again after 1 second, then 2, 4, up to a minute. It reads `GET /me` to catch up, as a
   `resync` frame, then subscribes again. A stream doesn't replay what happened while it was closed.
 - On close 4029 (too fast, or too many streams) it waits the `retryAfter` eta gives.

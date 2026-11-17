@@ -32,6 +32,7 @@ export class EtaStream {
     #channels;
     #syms;
     #pingMs;
+    #openTimeoutMs;
     #backoffMs;
     #maxBackoffMs;
     #resync;
@@ -47,6 +48,7 @@ export class EtaStream {
     #lastError = null;
     #dropReason = null;
     #ping;
+    #openTimer;
     #cancelWait = null;
     #listeners = new Map();
     #iterating = false;
@@ -67,6 +69,7 @@ export class EtaStream {
         this.#syms = options.syms ? [...options.syms] : null;
         this.url = options.url ?? streamUrl(client.baseUrl);
         this.#pingMs = options.pingMs ?? 30_000;
+        this.#openTimeoutMs = options.openTimeoutMs ?? 10_000;
         this.#backoffMs = options.backoffMs ?? 1_000;
         this.#maxBackoffMs = options.maxBackoffMs ?? 60_000;
         this.#resync = options.resync ?? true;
@@ -138,6 +141,7 @@ export class EtaStream {
         const ws = this.#ws;
         this.#ws = null;
         this.#stopPing();
+        this.#stopOpenTimer();
         if (ws) {
             try {
                 ws.close(1000, "bye");
@@ -195,6 +199,22 @@ export class EtaStream {
         }
         this.#ws = ws;
         this.#lastError = null;
+        // a handshake that never answers (a lost SYN, a hung proxy, no ready to the key) may never fire onclose: drop it at the deadline
+        this.#stopOpenTimer();
+        this.#openTimer = setTimeout(() => {
+            if (ws !== this.#ws)
+                return;
+            this.#dropReason = "open timeout";
+            ws.onclose = null; // the drop is reported here, once, with no close code (a socket closed while opening fires a close of its own)
+            ws.onmessage = null;
+            try {
+                ws.close();
+            }
+            catch {
+                // not open yet: dropping it below is enough
+            }
+            this.#dropped(ws, undefined, undefined);
+        }, this.#openTimeoutMs);
         ws.onopen = () => this.#send(ws, { type: "auth", key: this.#key });
         ws.onmessage = (event) => this.#message(ws, event.data);
         ws.onerror = () => undefined; // a close follows
@@ -210,6 +230,7 @@ export class EtaStream {
             this.#lastError = frame;
         this.#emit(frame);
         if (frame.type === "ready") {
+            this.#stopOpenTimer();
             this.handle = frame.handle;
             this.#backoff = this.#backoffMs;
             void this.#afterReady(ws);
@@ -217,6 +238,8 @@ export class EtaStream {
     }
     /** After a drop, catch up with GET /me; then subscribe and start pinging. */
     async #afterReady(ws) {
+        if (this.#closed || ws !== this.#ws)
+            return; // a ready handler closed the stream
         if (this.#hadSession && this.#resync && this.#channels.includes("account")) {
             let me;
             try {
@@ -239,6 +262,8 @@ export class EtaStream {
             if (ws !== this.#ws)
                 return;
             this.#emit({ type: "resync", me });
+            if (this.#closed || ws !== this.#ws)
+                return; // a resync handler closed the stream
         }
         this.#hadSession = true;
         this.#live = true;
@@ -254,6 +279,7 @@ export class EtaStream {
         this.#ws = null;
         this.#live = false;
         this.#stopPing();
+        this.#stopOpenTimer();
         if (this.#closed)
             return this.#end(null);
         const last = this.#lastError;
@@ -293,6 +319,7 @@ export class EtaStream {
             return;
         this.#ended = true;
         this.#stopPing();
+        this.#stopOpenTimer();
         this.#cancelWait?.();
         for (const handler of this.#listeners.get("end") ?? [])
             call(handler, error);
@@ -318,6 +345,11 @@ export class EtaStream {
         if (this.#ping !== undefined)
             clearInterval(this.#ping);
         this.#ping = undefined;
+    }
+    #stopOpenTimer() {
+        if (this.#openTimer !== undefined)
+            clearTimeout(this.#openTimer);
+        this.#openTimer = undefined;
     }
 }
 // ---------- helpers ----------

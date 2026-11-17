@@ -50,6 +50,9 @@ class EtaStream:
         url: The stream's address. Made from the client's ``base_url`` by default.
         ping_interval: Seconds between pings. 30 by default; eta closes a stream
             that sends nothing for 60.
+        open_timeout: Seconds from connecting to eta's ``ready`` (the WebSocket
+            opens, eta answers the key). Past it, the stream drops and connects
+            again. 10 by default.
         backoff: The first wait before connecting again, in seconds. 1 by default.
         max_backoff: The longest wait. 60 by default.
         resync: Read ``GET /me`` after each reconnect, when ``account`` is on. True by default.
@@ -65,6 +68,7 @@ class EtaStream:
         *,
         url: Optional[str] = None,
         ping_interval: float = 30.0,
+        open_timeout: float = 10.0,
         backoff: float = 1.0,
         max_backoff: float = 60.0,
         resync: bool = True,
@@ -79,6 +83,7 @@ class EtaStream:
         self._channels: List[str] = wanted
         self._syms: Optional[List[str]] = list(syms) if syms is not None else None
         self.ping_interval = ping_interval
+        self.open_timeout = open_timeout
         self.backoff = backoff
         self.max_backoff = max_backoff
         self.resync = resync
@@ -157,18 +162,24 @@ class EtaStream:
         self._stop = asyncio.Event()  # made here, in the running loop (Python 3.9 binds an Event to a loop when made)
         backoff = self.backoff
         had_session = False
-        options: Dict[str, Any] = {"open_timeout": 10, "max_size": 2 ** 24,
+        options: Dict[str, Any] = {"open_timeout": self.open_timeout, "max_size": 2 ** 24,
                                    "user_agent_header": f"eta-api-python/{__version__}"}
         options.update(self._connect_options)
+        loop = asyncio.get_running_loop()
         while not self._closed:
             last_error: Optional[Dict[str, Any]] = None
             dropped: Optional[str] = None
             code: Optional[int] = None
             reason = ""
+            # one deadline from connecting to ready: connect's own open_timeout covers the WebSocket handshake, the watchdog the
+            # wait for eta to answer the key (a server that opens and then says nothing would otherwise hold the stream for good)
+            deadline = loop.time() + float(options["open_timeout"])
+            timed_out: Dict[str, bool] = {}
             try:
                 async with connect(self.url, **options) as ws:
                     self._ws = ws
                     pinger: Optional["asyncio.Future[None]"] = None
+                    watchdog = asyncio.ensure_future(self._open_deadline(ws, deadline - loop.time(), timed_out))
                     try:
                         await ws.send(json.dumps({"type": "auth", "key": self._client._key}))
                         async for raw in ws:
@@ -184,6 +195,7 @@ class EtaStream:
                                 yield frame
                                 continue
                             # ready: the key opened. Catch up (after a drop), then subscribe.
+                            watchdog.cancel()
                             self.handle = frame.get("handle")
                             backoff = self.backoff
                             yield frame
@@ -205,6 +217,7 @@ class EtaStream:
                     finally:
                         self._live = False
                         self._ws = None
+                        watchdog.cancel()
                         if pinger is not None:
                             pinger.cancel()
                     code, reason = _close_of(ws)
@@ -212,6 +225,10 @@ class EtaStream:
                 code, reason = (exc.rcvd.code, exc.rcvd.reason) if exc.rcvd is not None else (None, "")
             except (OSError, asyncio.TimeoutError, WebSocketException) as exc:
                 code, reason = None, f"{type(exc).__name__}: {exc}"[:200]
+                if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+                    timed_out["yes"] = True
+            if timed_out:
+                code, dropped = None, "open timeout"
 
             if self._closed:
                 return
@@ -234,6 +251,15 @@ class EtaStream:
         if "marks" in self._channels and self._syms is not None:
             frame["syms"] = self._syms
         await ws.send(json.dumps(frame))
+
+    async def _open_deadline(self, ws: Any, seconds: float, timed_out: Dict[str, bool]) -> None:
+        """Closes a connection that hasn't had ``ready`` by the deadline. Cancelled when ``ready`` comes."""
+        try:
+            await asyncio.sleep(max(seconds, 0.0))
+        except asyncio.CancelledError:
+            return
+        timed_out["yes"] = True
+        await ws.close()
 
     async def _ping(self, ws: Any) -> None:
         try:

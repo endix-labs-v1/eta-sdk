@@ -270,6 +270,8 @@ class MockStream:
         """Connection number -> what to do after its first subscribe (push frames, close it)."""
         self.sockets: set = set()
         """The connections open now."""
+        self.silent: set = set()
+        """Connection numbers that open but never answer the auth frame."""
         self._server: Any = None
 
     async def start(self) -> "MockStream":
@@ -305,6 +307,8 @@ class MockStream:
             kind = frame.get("type")
             self.log.add(f"ws{n} {kind}")
             if kind == "auth":
+                if n in self.silent:
+                    continue
                 if n in self.refuse:
                     code, err = self.refuse[n]
                     await ws.send(json.dumps({"type": "error", **err}))

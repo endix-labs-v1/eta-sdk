@@ -30,6 +30,9 @@ export interface StreamOptions {
   url?: string;
   /** Milliseconds between pings. 30,000 by default; eta closes a stream that sends nothing for 60 seconds. */
   pingMs?: number;
+  /** Milliseconds from connecting to eta's `ready` (the WebSocket opens, eta answers the key). Past it, the stream drops and connects
+   *  again. 10,000 by default. */
+  openTimeoutMs?: number;
   /** The first wait before connecting again, in milliseconds. 1,000 by default. */
   backoffMs?: number;
   /** The longest wait. 60,000 by default. */
@@ -77,6 +80,7 @@ export class EtaStream implements AsyncIterable<Frame> {
   #channels: Channel[];
   #syms: string[] | null;
   readonly #pingMs: number;
+  readonly #openTimeoutMs: number;
   readonly #backoffMs: number;
   readonly #maxBackoffMs: number;
   readonly #resync: boolean;
@@ -93,6 +97,7 @@ export class EtaStream implements AsyncIterable<Frame> {
   #lastError: ErrorFrame | null = null;
   #dropReason: string | null = null;
   #ping: ReturnType<typeof setInterval> | undefined;
+  #openTimer: ReturnType<typeof setTimeout> | undefined;
   #cancelWait: (() => void) | null = null;
   readonly #listeners = new Map<string, Set<Listener>>();
   #iterating = false;
@@ -112,6 +117,7 @@ export class EtaStream implements AsyncIterable<Frame> {
     this.#syms = options.syms ? [...options.syms] : null;
     this.url = options.url ?? streamUrl(client.baseUrl);
     this.#pingMs = options.pingMs ?? 30_000;
+    this.#openTimeoutMs = options.openTimeoutMs ?? 10_000;
     this.#backoffMs = options.backoffMs ?? 1_000;
     this.#maxBackoffMs = options.maxBackoffMs ?? 60_000;
     this.#resync = options.resync ?? true;
@@ -190,6 +196,7 @@ export class EtaStream implements AsyncIterable<Frame> {
     const ws = this.#ws;
     this.#ws = null;
     this.#stopPing();
+    this.#stopOpenTimer();
     if (ws) {
       try {
         ws.close(1000, "bye");
@@ -244,6 +251,20 @@ export class EtaStream implements AsyncIterable<Frame> {
     }
     this.#ws = ws;
     this.#lastError = null;
+    // a handshake that never answers (a lost SYN, a hung proxy, no ready to the key) may never fire onclose: drop it at the deadline
+    this.#stopOpenTimer();
+    this.#openTimer = setTimeout(() => {
+      if (ws !== this.#ws) return;
+      this.#dropReason = "open timeout";
+      ws.onclose = null; // the drop is reported here, once, with no close code (a socket closed while opening fires a close of its own)
+      ws.onmessage = null;
+      try {
+        ws.close();
+      } catch {
+        // not open yet: dropping it below is enough
+      }
+      this.#dropped(ws, undefined, undefined);
+    }, this.#openTimeoutMs);
     ws.onopen = () => this.#send(ws, { type: "auth", key: this.#key });
     ws.onmessage = (event) => this.#message(ws, event.data);
     ws.onerror = () => undefined; // a close follows
@@ -257,6 +278,7 @@ export class EtaStream implements AsyncIterable<Frame> {
     if (frame.type === "error") this.#lastError = frame;
     this.#emit(frame);
     if (frame.type === "ready") {
+      this.#stopOpenTimer();
       this.handle = frame.handle;
       this.#backoff = this.#backoffMs;
       void this.#afterReady(ws);
@@ -265,6 +287,7 @@ export class EtaStream implements AsyncIterable<Frame> {
 
   /** After a drop, catch up with GET /me; then subscribe and start pinging. */
   async #afterReady(ws: WebSocketLike): Promise<void> {
+    if (this.#closed || ws !== this.#ws) return; // a ready handler closed the stream
     if (this.#hadSession && this.#resync && this.#channels.includes("account")) {
       let me: Me;
       try {
@@ -284,6 +307,7 @@ export class EtaStream implements AsyncIterable<Frame> {
       }
       if (ws !== this.#ws) return;
       this.#emit({ type: "resync", me });
+      if (this.#closed || ws !== this.#ws) return; // a resync handler closed the stream
     }
     this.#hadSession = true;
     this.#live = true;
@@ -299,6 +323,7 @@ export class EtaStream implements AsyncIterable<Frame> {
     this.#ws = null;
     this.#live = false;
     this.#stopPing();
+    this.#stopOpenTimer();
     if (this.#closed) return this.#end(null);
     const last = this.#lastError;
     const err = last?.err ?? this.#dropReason ?? (reason || null);
@@ -333,6 +358,7 @@ export class EtaStream implements AsyncIterable<Frame> {
     if (this.#ended) return;
     this.#ended = true;
     this.#stopPing();
+    this.#stopOpenTimer();
     this.#cancelWait?.();
     for (const handler of this.#listeners.get("end") ?? []) call(handler, error);
     // a waiter means the queue is empty: the first waiter gets the error; else next() gives it once the queue is read
@@ -356,6 +382,11 @@ export class EtaStream implements AsyncIterable<Frame> {
   #stopPing(): void {
     if (this.#ping !== undefined) clearInterval(this.#ping);
     this.#ping = undefined;
+  }
+
+  #stopOpenTimer(): void {
+    if (this.#openTimer !== undefined) clearTimeout(this.#openTimer);
+    this.#openTimer = undefined;
   }
 }
 

@@ -39,6 +39,8 @@ export class MockApi {
   refuse = new Map();
   /** connection number -> async (ws) => ..., run after its first subscribe */
   afterSubscribe = new Map();
+  /** connection numbers that open but never answer the auth frame */
+  silent = new Set();
   sockets = new Set();
 
   async start() {
@@ -171,6 +173,7 @@ export class MockApi {
       this.frames.push([n, frame]);
       this.log.push(`ws${n} ${frame.type}`);
       if (frame.type === "auth") {
+        if (this.silent.has(n)) return;
         if (this.refuse.has(n)) {
           const [code, err] = this.refuse.get(n);
           send({ type: "error", ...err });

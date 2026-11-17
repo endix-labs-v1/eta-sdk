@@ -1,5 +1,6 @@
 // The stream against the local mock: auth, subscribe, ping, reconnect with a /me resync, and stop on 4001. Runs the built package.
 import assert from "node:assert/strict";
+import net from "node:net";
 import { afterEach, beforeEach, test } from "node:test";
 import { WebSocket as WsWebSocket } from "ws";
 import { EtaClient, EtaError } from "../dist/index.js";
@@ -230,4 +231,75 @@ test("a WebSocket class can be passed in", async () => {
   assert.deepEqual(types(frames), ["ready", "subscribed", "me"]);
   assert.equal(made, 1);
   stream.close();
+});
+
+// ---------- Bugbot on PR #1 ----------
+
+/** A WebSocket that notes each frame the stream sends, and whether the stream was closed by then. */
+function notingWebSocket(state) {
+  return class extends globalThis.WebSocket {
+    send(data) {
+      state.sent.push({ type: JSON.parse(data).type, afterClose: state.closed });
+      return super.send(data);
+    }
+  };
+}
+
+test("closing in a ready handler starts no ping timer and sends nothing more", async () => {
+  const state = { sent: [], closed: false };
+  const stream = eta.stream({ WebSocket: notingWebSocket(state), pingMs: 20 });
+  stream.on("ready", () => {
+    state.closed = true;
+    stream.close();
+  });
+  await waitUntil(() => state.closed);
+  await new Promise((ok) => setTimeout(ok, 150));
+  assert.deepEqual(state.sent.filter((f) => f.afterClose).map((f) => f.type), [], "no subscribe and no ping after close()");
+});
+
+test("closing in a resync handler starts no ping timer and sends nothing more", async () => {
+  api.afterSubscribe.set(1, async (ws) => ws.close(1012, "restart"));
+  const state = { sent: [], closed: false };
+  const s = sleeps();
+  const stream = eta.stream({ WebSocket: notingWebSocket(state), pingMs: 20, sleep: s.sleep });
+  stream.on("resync", () => {
+    state.closed = true;
+    stream.close();
+  });
+  await waitUntil(() => state.closed);
+  await new Promise((ok) => setTimeout(ok, 150));
+  assert.deepEqual(state.sent.filter((f) => f.afterClose).map((f) => f.type), [], "no subscribe and no ping after close()");
+});
+
+test("a handshake that never answers times out, then connects again", async () => {
+  // a TCP server that takes the connection and never answers the WebSocket upgrade
+  const held = new Set();
+  let accepted = 0;
+  const silent = net.createServer((sock) => {
+    accepted++;
+    held.add(sock);
+  });
+  await new Promise((ok) => silent.listen(0, "127.0.0.1", ok));
+  try {
+    const s = sleeps();
+    const stream = eta.stream({ url: `ws://127.0.0.1:${silent.address().port}/stream`, openTimeoutMs: 100, sleep: s.sleep });
+    const closed = [];
+    stream.on("closed", (f) => closed.push(f));
+    await waitUntil(() => closed.length >= 2, 3000);
+    assert.deepEqual(closed[0], { type: "closed", code: null, err: "open timeout", wait: 1 });
+    assert.ok(accepted >= 2, "it connected again");
+    stream.close();
+  } finally {
+    for (const sock of held) sock.destroy();
+    await new Promise((ok) => silent.close(ok));
+  }
+});
+
+test("a stream that opens but never answers the key times out, then connects again", async () => {
+  api.silent.add(1);
+  const s = sleeps();
+  const stream = eta.stream({ openTimeoutMs: 100, sleep: s.sleep });
+  const frames = await take(stream[Symbol.asyncIterator](), 2);
+  assert.deepEqual(frames, [{ type: "closed", code: null, err: "open timeout", wait: 1 }, { type: "ready", handle: "yourhandle" }]);
+  assert.equal(api.connections, 2);
 });
