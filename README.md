@@ -178,10 +178,12 @@ What it does for you:
 
 - It sends your key in the first frame, never in the URL, then subscribes.
 - It pings every 30 seconds. eta closes a stream that sends nothing for 60.
-- If the stream hasn't opened and had eta's `ready` within 10 seconds, it drops the socket at once, without waiting
-  on a close, and connects again (`open_timeout` / `openTimeoutMs`). A handshake that never answers can't hold it for
-  good. `open_timeout=None` in Python, or `openTimeoutMs: null` in TypeScript, turns the deadline off. 0 and below
-  are refused.
+- If the stream hasn't opened and had eta's `ready` within 10 seconds, it gives up on that socket and connects
+  again at once (`open_timeout` / `openTimeoutMs`), so a handshake that never answers can't hold it for good. Python
+  aborts the old socket, and so does TypeScript with the `ws` package. Node's built-in `WebSocket` has no way to abort
+  a socket, so there the old one is closed in the background: a peer that never answers can keep it open, and keep a
+  script from exiting, for a long time. Pass `WebSocket` from `ws` if that matters. `open_timeout=None` in Python, or
+  `openTimeoutMs: null` in TypeScript, turns the deadline off. 0 and below are refused.
 - When the stream drops, it connects again after 1 second, then 2, 4, up to a minute. It reads `GET /me` to catch up, as a
   `resync` frame, then subscribes again. A stream doesn't replay what happened while it was closed.
 - On close 4029 (too fast, or too many streams) it waits the `retryAfter` eta gives.

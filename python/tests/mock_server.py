@@ -272,12 +272,18 @@ class MockStream:
         """The connections open now."""
         self.silent: set = set()
         """Connection numbers that open but never answer the auth frame."""
+        self.handshake_delay = 0.0
+        """Seconds the server waits before it answers the WebSocket upgrade."""
         self.before_ready: Dict[int, List[Dict[str, Any]]] = {}
         """Connection number -> frames sent after its auth frame, just before ready."""
         self._server: Any = None
 
     async def start(self) -> "MockStream":
-        self._server = await serve(self._handler, "127.0.0.1", 0)
+        async def slow(connection: Any, request: Any) -> None:
+            if self.handshake_delay:
+                await asyncio.sleep(self.handshake_delay)
+
+        self._server = await serve(self._handler, "127.0.0.1", 0, process_request=slow)
         return self
 
     @property

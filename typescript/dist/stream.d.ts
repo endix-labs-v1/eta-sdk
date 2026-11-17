@@ -10,6 +10,8 @@ export interface WebSocketLike {
     readonly readyState: number;
     send(data: string): void;
     close(code?: number, reason?: string): void;
+    /** Destroys the socket at once, with no close handshake. The `ws` package has it; the global WebSocket doesn't. */
+    terminate?(): void;
     onopen: ((event: unknown) => void) | null;
     onmessage: ((event: {
         data: unknown;
@@ -41,7 +43,7 @@ export interface StreamOptions {
     resync?: boolean;
     /** The WebSocket class to use. The global one by default, else the `ws` package. */
     WebSocket?: WebSocketConstructor;
-    /** How the stream waits before connecting again. A `setTimeout` promise by default. */
+    /** How the stream waits before connecting again. A `setTimeout` that `close()` clears, by default. */
     sleep?: (ms: number) => Promise<void>;
 }
 type FrameOf<K extends Frame["type"]> = Extract<Frame, {

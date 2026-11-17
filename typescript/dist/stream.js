@@ -74,7 +74,7 @@ export class EtaStream {
         this.#maxBackoffMs = options.maxBackoffMs ?? 60_000;
         this.#resync = options.resync ?? true;
         this.#WebSocket = options.WebSocket;
-        this.#sleep = options.sleep ?? ((ms) => new Promise((done) => setTimeout(done, ms)));
+        this.#sleep = options.sleep ?? null;
         this.#backoff = this.#backoffMs;
         this.#done = new Promise((resolve, reject) => {
             this.#settle = (error) => (error ? reject(error) : resolve());
@@ -207,24 +207,16 @@ export class EtaStream {
                     return;
                 this.#lastError = null; // the deadline is why it drops, whatever error frame came before it
                 this.#dropReason = "open timeout";
-                // the drop is reported here, once, with no close code; the socket is abandoned: it never gets the key, and if it opens late
-                // it is closed (a socket closed while opening fires a close of its own, and a passed-in one may not close at all)
-                const shut = () => {
-                    try {
-                        ws.close();
-                    }
-                    catch {
-                        // not open yet, or a socket that can't close: it has no handlers left
-                    }
-                };
-                ws.onopen = shut;
+                // the drop is reported here, once, with no close code (a socket closed while opening fires a close of its own). The socket
+                // is abandoned: destroyed where it can be, never given the key, and shut again if it opens late (onopen below)
                 ws.onclose = null;
                 ws.onmessage = null;
-                shut();
+                abandon(ws);
                 this.#dropped(ws, undefined, undefined);
             }, this.#openTimeoutMs);
         }
-        ws.onopen = () => this.#send(ws, { type: "auth", key: this.#key });
+        // the key goes only to the stream's own open socket: one that opens after close() or after its deadline is shut instead
+        ws.onopen = () => (ws === this.#ws && !this.#closed ? this.#send(ws, { type: "auth", key: this.#key }) : abandon(ws));
         ws.onmessage = (event) => this.#message(ws, event.data);
         ws.onerror = () => undefined; // a close follows
         ws.onclose = (event) => this.#dropped(ws, event.code, event.reason);
@@ -307,7 +299,19 @@ export class EtaStream {
         void this.#reconnectAfter(wait);
     }
     async #reconnectAfter(ms) {
-        await Promise.race([this.#sleep(ms), new Promise((done) => (this.#cancelWait = done))]);
+        // close() ends the wait at once, and clears the default timer, so a script that closes the stream can exit at once
+        await new Promise((done) => {
+            let timer;
+            this.#cancelWait = () => {
+                if (timer !== undefined)
+                    clearTimeout(timer);
+                done();
+            };
+            if (this.#sleep)
+                this.#sleep(ms).then(done, done);
+            else
+                timer = setTimeout(done, ms);
+        });
         this.#cancelWait = null;
         if (!this.#closed)
             await this.#connect();
@@ -395,6 +399,18 @@ function parse(data) {
     }
     catch {
         return null;
+    }
+}
+/** Gives up on a socket: destroys it where it can be (ws's terminate()), else closes it. It throws nothing. */
+function abandon(ws) {
+    try {
+        if (typeof ws.terminate === "function")
+            ws.terminate();
+        else
+            ws.close();
+    }
+    catch {
+        // not open yet, or a socket that can't close: it has no handlers left that act
     }
 }
 /** A handler that throws is reported as the platform reports a throwing event listener; the stream goes on. */

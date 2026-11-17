@@ -1,5 +1,6 @@
 // The stream against the local mock: auth, subscribe, ping, reconnect with a /me resync, and stop on 4001. Runs the built package.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import net from "node:net";
 import { afterEach, beforeEach, test } from "node:test";
 import { WebSocket as WsWebSocket } from "ws";
@@ -376,4 +377,125 @@ test("a timed-out drop reports the open timeout, not an error frame that came be
   await waitUntil(() => frames.some((f) => f.type === "closed"));
   assert.deepEqual(frames.find((f) => f.type === "closed"), { type: "closed", code: null, err: "open timeout", wait: 1 });
   stream.close();
+});
+
+// ---------- Claude review of 3c82345 on PR #1 ----------
+
+/** A WebSocketLike the test drives: it never opens by itself, and close() does nothing while it is opening. */
+class Manual {
+  static made = [];
+  readyState = 0;
+  sent = [];
+  closes = 0;
+  onopen = null;
+  onmessage = null;
+  onclose = null;
+  onerror = null;
+  constructor() {
+    Manual.made.push(this);
+  }
+  send(data) {
+    this.sent.push(data);
+  }
+  close() {
+    this.closes++;
+  }
+}
+
+test("close() before the socket opens: a late open sends no key", async () => {
+  Manual.made = [];
+  const stream = eta.stream({ WebSocket: Manual });
+  stream.start();
+  await waitUntil(() => Manual.made.length === 1);
+  stream.close();
+  const late = Manual.made[0];
+  late.readyState = 1;
+  late.onopen?.({});
+  assert.deepEqual(late.sent, [], "never the key on a stream that was closed");
+});
+
+test("openTimeoutMs null or Infinity arms no timer", async () => {
+  const realSet = globalThis.setTimeout;
+  const delays = [];
+  globalThis.setTimeout = (fn, ms, ...rest) => {
+    if (ms >= 1000) delays.push(ms); // the stream's own timers; the test's polling uses 10 ms
+    return realSet(fn, ms, ...rest);
+  };
+  try {
+    for (const [openTimeoutMs, armed] of [[undefined, [10_000]], [null, []], [Infinity, []]]) {
+      Manual.made = [];
+      delays.length = 0;
+      const stream = eta.stream({ WebSocket: Manual, ...(openTimeoutMs === undefined ? {} : { openTimeoutMs }) });
+      stream.start();
+      await waitUntil(() => Manual.made.length === 1);
+      assert.deepEqual(delays, armed, `openTimeoutMs ${openTimeoutMs}`);
+      stream.close();
+    }
+  } finally {
+    globalThis.setTimeout = realSet;
+  }
+});
+
+test("close() clears the backoff timer", async () => {
+  api.refuse.set(1, [4008, { err: "no auth" }]);
+  const realSet = globalThis.setTimeout;
+  const realClear = globalThis.clearTimeout;
+  const backoffs = [];
+  const cleared = new Set();
+  globalThis.setTimeout = (fn, ms, ...rest) => {
+    const t = realSet(fn, ms, ...rest);
+    if (ms === 5000) backoffs.push(t);
+    return t;
+  };
+  globalThis.clearTimeout = (t) => {
+    cleared.add(t);
+    return realClear(t);
+  };
+  try {
+    const stream = eta.stream({ backoffMs: 5000 });
+    let closed = 0;
+    stream.on("closed", () => closed++);
+    await waitUntil(() => closed === 1 && backoffs.length === 1);
+    stream.close();
+    assert.ok(cleared.has(backoffs[0]), "the 5 s backoff timer is cleared, so the process can exit at once");
+  } finally {
+    globalThis.setTimeout = realSet;
+    globalThis.clearTimeout = realClear;
+  }
+});
+
+test("with the ws package, a timed-out socket is destroyed at once", async () => {
+  // a peer that completes the WebSocket upgrade, then answers nothing: not the key, not the close
+  const peers = [];
+  const mute = net.createServer((sock) => {
+    peers.push(sock);
+    let head = "";
+    sock.on("data", (d) => {
+      if (sock.upgraded) return;
+      head += d.toString("latin1");
+      if (!head.includes("\r\n\r\n")) return;
+      const key = /sec-websocket-key:\s*(\S+)/i.exec(head)[1];
+      const accept = createHash("sha1").update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
+      sock.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+      sock.upgraded = true;
+    });
+    sock.on("close", () => (sock.ended = true));
+  });
+  await new Promise((ok) => mute.listen(0, "127.0.0.1", ok));
+  try {
+    const s = sleeps();
+    const stream = eta.stream({ url: `ws://127.0.0.1:${mute.address().port}/stream`, WebSocket: WsWebSocket, openTimeoutMs: 100, sleep: s.sleep });
+    const closed = [];
+    stream.on("closed", (f) => {
+      closed.push(f);
+      stream.close();
+    });
+    await waitUntil(() => closed.length === 1);
+    assert.equal(closed[0].err, "open timeout");
+    assert.ok(peers[0].upgraded, "the socket had opened");
+    await waitUntil(() => peers[0].ended, 1000); // ws's close() would hold it for its 30 s close timeout
+  } finally {
+    for (const sock of peers) sock.destroy();
+    await new Promise((ok) => mute.close(ok));
+  }
 });

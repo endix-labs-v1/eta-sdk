@@ -14,6 +14,8 @@ export interface WebSocketLike {
   readonly readyState: number;
   send(data: string): void;
   close(code?: number, reason?: string): void;
+  /** Destroys the socket at once, with no close handshake. The `ws` package has it; the global WebSocket doesn't. */
+  terminate?(): void;
   onopen: ((event: unknown) => void) | null;
   onmessage: ((event: { data: unknown }) => void) | null;
   onclose: ((event: { code: number; reason: string }) => void) | null;
@@ -41,7 +43,7 @@ export interface StreamOptions {
   resync?: boolean;
   /** The WebSocket class to use. The global one by default, else the `ws` package. */
   WebSocket?: WebSocketConstructor;
-  /** How the stream waits before connecting again. A `setTimeout` promise by default. */
+  /** How the stream waits before connecting again. A `setTimeout` that `close()` clears, by default. */
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -85,7 +87,7 @@ export class EtaStream implements AsyncIterable<Frame> {
   readonly #maxBackoffMs: number;
   readonly #resync: boolean;
   readonly #WebSocket?: WebSocketConstructor;
-  readonly #sleep: (ms: number) => Promise<void>;
+  readonly #sleep: ((ms: number) => Promise<void>) | null;
 
   #ws: WebSocketLike | null = null;
   #backoff: number;
@@ -122,7 +124,7 @@ export class EtaStream implements AsyncIterable<Frame> {
     this.#maxBackoffMs = options.maxBackoffMs ?? 60_000;
     this.#resync = options.resync ?? true;
     this.#WebSocket = options.WebSocket;
-    this.#sleep = options.sleep ?? ((ms) => new Promise((done) => setTimeout(done, ms)));
+    this.#sleep = options.sleep ?? null;
     this.#backoff = this.#backoffMs;
     this.#done = new Promise<void>((resolve, reject) => {
       this.#settle = (error) => (error ? reject(error) : resolve());
@@ -258,23 +260,16 @@ export class EtaStream implements AsyncIterable<Frame> {
         if (ws !== this.#ws) return;
         this.#lastError = null; // the deadline is why it drops, whatever error frame came before it
         this.#dropReason = "open timeout";
-        // the drop is reported here, once, with no close code; the socket is abandoned: it never gets the key, and if it opens late
-        // it is closed (a socket closed while opening fires a close of its own, and a passed-in one may not close at all)
-        const shut = () => {
-          try {
-            ws.close();
-          } catch {
-            // not open yet, or a socket that can't close: it has no handlers left
-          }
-        };
-        ws.onopen = shut;
+        // the drop is reported here, once, with no close code (a socket closed while opening fires a close of its own). The socket
+        // is abandoned: destroyed where it can be, never given the key, and shut again if it opens late (onopen below)
         ws.onclose = null;
         ws.onmessage = null;
-        shut();
+        abandon(ws);
         this.#dropped(ws, undefined, undefined);
       }, this.#openTimeoutMs);
     }
-    ws.onopen = () => this.#send(ws, { type: "auth", key: this.#key });
+    // the key goes only to the stream's own open socket: one that opens after close() or after its deadline is shut instead
+    ws.onopen = () => (ws === this.#ws && !this.#closed ? this.#send(ws, { type: "auth", key: this.#key }) : abandon(ws));
     ws.onmessage = (event) => this.#message(ws, event.data);
     ws.onerror = () => undefined; // a close follows
     ws.onclose = (event) => this.#dropped(ws, event.code, event.reason);
@@ -350,7 +345,16 @@ export class EtaStream implements AsyncIterable<Frame> {
   }
 
   async #reconnectAfter(ms: number): Promise<void> {
-    await Promise.race([this.#sleep(ms), new Promise<void>((done) => (this.#cancelWait = done))]);
+    // close() ends the wait at once, and clears the default timer, so a script that closes the stream can exit at once
+    await new Promise<void>((done) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      this.#cancelWait = () => {
+        if (timer !== undefined) clearTimeout(timer);
+        done();
+      };
+      if (this.#sleep) this.#sleep(ms).then(done, done);
+      else timer = setTimeout(done, ms);
+    });
     this.#cancelWait = null;
     if (!this.#closed) await this.#connect();
   }
@@ -433,6 +437,16 @@ function parse(data: unknown): Frame | null {
     return frame && typeof frame === "object" && typeof frame.type === "string" ? (frame as Frame) : null;
   } catch {
     return null;
+  }
+}
+
+/** Gives up on a socket: destroys it where it can be (ws's terminate()), else closes it. It throws nothing. */
+function abandon(ws: WebSocketLike): void {
+  try {
+    if (typeof ws.terminate === "function") ws.terminate();
+    else ws.close();
+  } catch {
+    // not open yet, or a socket that can't close: it has no handlers left that act
   }
 }
 

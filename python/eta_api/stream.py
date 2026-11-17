@@ -183,6 +183,8 @@ class EtaStream:
             timed_out: Dict[str, bool] = {}
             try:
                 async with connect(self.url, **options) as ws:
+                    if self._closed:
+                        return  # closed while it was opening: leaving the block closes it, and the key is never sent
                     self._ws = ws
                     pinger: Optional["asyncio.Future[None]"] = None
                     watchdog: Optional["asyncio.Future[None]"] = None
@@ -239,7 +241,8 @@ class EtaStream:
                 code, reason = None, f"{type(exc).__name__}: {exc}"[:200]
                 if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
                     timed_out["yes"] = True
-            if timed_out:  # the deadline is why it dropped, whatever error frame came before it
+            # the deadline dropped it, and no close came (None, or 1006, which no peer sends): that is why, not an earlier error frame
+            if timed_out and code in (None, 1006):
                 code, dropped, last_error = None, "open timeout", None
 
             if self._closed:
@@ -274,6 +277,8 @@ class EtaStream:
             await asyncio.sleep(max(seconds, 0.0))
         except asyncio.CancelledError:
             return
+        if _has_close(ws):
+            return  # a close came first (4001, 4029...): it says why the stream ended, and keeps its code
         timed_out["yes"] = True
         transport = getattr(ws, "transport", None)
         if transport is not None:
@@ -299,6 +304,14 @@ class EtaStream:
         finally:
             sleeper.cancel()
             stopper.cancel()
+
+
+def _has_close(ws: Any) -> bool:
+    """The connection has had a close, from the server or from this side."""
+    protocol = getattr(ws, "protocol", None)
+    if getattr(protocol, "close_rcvd", None) is not None:
+        return True
+    return getattr(getattr(protocol, "state", None), "name", "OPEN") in ("CLOSING", "CLOSED")
 
 
 def _open_timeout(value: Any, name: str) -> Optional[float]:

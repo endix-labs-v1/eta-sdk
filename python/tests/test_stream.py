@@ -12,7 +12,7 @@ from typing import Any, Awaitable, Callable, Dict, List
 import pytest
 from mock_server import KEY, ME, Answer, Log, MockHttp, MockStream, wait_until
 
-from eta_api import EtaClient, EtaError
+from eta_api import EtaClient, EtaError, EtaStream
 
 
 class AsyncSleeps:
@@ -405,5 +405,74 @@ def test_a_peer_that_answers_nothing_is_dropped_at_the_deadline(client: EtaClien
             for w in held:
                 w.close()
             peer.close()
+
+    run(test, log)
+
+
+# ---------- Claude review of 3c82345 on PR #1 ----------
+
+@pytest.mark.parametrize("code,err", [(4001, {"err": "bad key"}), (4029, {"err": "too fast", "retryAfter": 7})],
+                         ids=["4001", "4029"])
+def test_a_real_close_keeps_its_code_when_the_reader_is_slow_past_the_deadline(
+    client: EtaClient, log: Log, code: int, err: Dict[str, Any]
+) -> None:
+    async def test(ws: MockStream) -> None:
+        ws.refuse[1] = (code, err)  # an error frame, then the close, both before any ready
+        stream = make(client, ws, AsyncSleeps(), connect_options={"open_timeout": 0.2})
+        it = stream.__aiter__()
+        assert await it.__anext__() == {"type": "error", **err}
+        await asyncio.sleep(0.4)  # the reader is busy past the deadline; the close is already in
+        if code == 4001:
+            with pytest.raises(EtaError) as caught:
+                await asyncio.wait_for(it.__anext__(), timeout=3)
+            assert (caught.value.code, caught.value.err) == (4001, "bad key")
+            assert ws.connections == 1
+        else:
+            frame = await asyncio.wait_for(it.__anext__(), timeout=3)
+            assert frame == {"type": "closed", "code": 4029, "err": "too fast", "wait": 7.0}
+            await stream.close()
+
+    run(test, log)
+
+
+def test_no_deadline_arms_no_watchdog(client: EtaClient, log: Log, monkeypatch: Any) -> None:
+    armed: List[float] = []
+    real = EtaStream._open_deadline
+
+    async def spy(self: Any, ws: Any, seconds: float, timed_out: Dict[str, bool]) -> None:
+        armed.append(seconds)
+        await real(self, ws, seconds, timed_out)
+
+    monkeypatch.setattr(EtaStream, "_open_deadline", spy)
+
+    async def test(ws: MockStream) -> None:
+        cases = [({}, 1), ({"open_timeout": None}, 0), ({"connect_options": {"open_timeout": None}}, 0),
+                 ({"open_timeout": math.inf}, 0)]
+        for options, watchdogs in cases:
+            armed.clear()
+            stream = make(client, ws, AsyncSleeps(), **options)
+            await asyncio.wait_for(take(stream.__aiter__(), 3), timeout=3)
+            assert len(armed) == watchdogs, f"{options}: {armed}"
+            await stream.close()
+
+    run(test, log)
+
+
+def test_close_during_the_handshake_stops_the_reader_and_sends_no_key(client: EtaClient, log: Log) -> None:
+    async def test(ws: MockStream) -> None:
+        ws.handshake_delay = 0.3
+        stream = make(client, ws, AsyncSleeps())
+        frames: List[Dict[str, Any]] = []
+
+        async def read() -> None:
+            async for frame in stream:
+                frames.append(frame)
+
+        reader = asyncio.ensure_future(read())
+        await asyncio.sleep(0.1)  # the WebSocket is still opening
+        await stream.close()
+        await asyncio.wait_for(reader, timeout=2)
+        await asyncio.sleep(0.3)
+        assert ws.received("auth") == [] and frames == [], "no key sent, nothing read"
 
     run(test, log)
