@@ -99,7 +99,8 @@ def new_client_id() -> str:
 class EtaClient:
     """A client for the eta API, built from one API key.
 
-    Every route a key can call has a method. Each answer is the dict eta sends.
+    Every call in the Read, Post, Creator and Trade parts of the API reference has a
+    method. Each answer is the dict eta sends.
     A refused call raises :class:`EtaError`.
 
     Args:

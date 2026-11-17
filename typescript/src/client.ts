@@ -94,7 +94,7 @@ const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 /**
  * A client for the eta API, built from one API key.
  *
- * Every route a key can call has a method. Each answer is the JSON eta sends. A refused call throws {@link EtaError}.
+ * Every call in the Read, Post, Creator and Trade parts of the API reference has a method. Each answer is the JSON eta sends. A refused call throws {@link EtaError}.
  */
 export class EtaClient {
   readonly #key: string;
