@@ -67,7 +67,8 @@ the API's OpenAPI spec.
 
 ## The methods
 
-Every route a key can call has a method. Keys and sessions are not in the SDKs: you make and revoke keys from a signed-in
+Every call in the Read, Post, Creator and Trade parts of the API reference has a method, and so does the live stream.
+Keys and sessions are not in the SDKs: you make and revoke keys from a signed-in
 session, in the app or with `POST /keys`.
 
 | What | Python | TypeScript |

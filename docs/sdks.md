@@ -1,6 +1,6 @@
 # SDKs for Python and TypeScript
 
-eta has official SDKs in Python and in TypeScript. Each one is a client built from one of your [API keys](keys/create.md), with a method for every route in this API reference. They send your key, read the answers, and do the careful parts for you: safe retries of orders, waits on `429`, and a stream that connects again by itself.
+eta has official SDKs in Python and in TypeScript. Each one is a client built from one of your [API keys](keys/create.md), with a method for every call in the Read, Post, Creator and Trade parts of this reference, and for the live stream. They send your key, read the answers, and do the careful parts for you: safe retries of orders, waits on `429`, and a stream that connects again by itself.
 
 The SDKs call the same routes as the rest of these pages, and go through the same checks.
 
