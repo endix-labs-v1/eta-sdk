@@ -476,3 +476,66 @@ def test_close_during_the_handshake_stops_the_reader_and_sends_no_key(client: Et
         assert ws.received("auth") == [] and frames == [], "no key sent, nothing read"
 
     run(test, log)
+
+
+# ---------- Claude review of 21927c8 on PR #1 ----------
+
+async def start_mute_peer() -> Any:
+    """A local peer that completes the WebSocket upgrade, then answers nothing: not the key, not a close."""
+    held: List[Any] = []
+
+    async def mute(reader: Any, writer: Any) -> None:
+        request = await reader.readuntil(b"\r\n\r\n")
+        key = [line.split(b":", 1)[1].strip() for line in request.split(b"\r\n") if line.lower().startswith(b"sec-websocket-key:")][0]
+        accept = base64.b64encode(hashlib.sha1(key + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest())
+        writer.write(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                     b"Sec-WebSocket-Accept: " + accept + b"\r\n\r\n")
+        held.append(writer)
+        await asyncio.sleep(30)
+
+    peer = await asyncio.start_server(mute, "127.0.0.1", 0)
+    return peer, peer.sockets[0].getsockname()[1], held
+
+
+def test_close_in_the_open_window_returns_at_once_against_a_mute_peer(client: EtaClient, log: Log) -> None:
+    async def test(_: MockStream) -> None:
+        peer, port, held = await start_mute_peer()
+        try:
+            stream = client.stream(url=f"ws://127.0.0.1:{port}/stream", sleep=AsyncSleeps(),
+                                   connect_options={"open_timeout": 0.3})
+
+            async def read() -> None:
+                async for _ in stream:
+                    pass
+
+            reader = asyncio.ensure_future(read())
+            await asyncio.sleep(0.1)  # open, the key sent, no ready yet
+            started = time.monotonic()
+            await asyncio.wait_for(stream.close(), timeout=5)
+            took = time.monotonic() - started
+            assert took < 1.0, f"close() took {took:.1f} s: it waited on a close the peer never answers"
+            await asyncio.wait_for(reader, timeout=2)
+        finally:
+            for w in held:
+                w.close()
+            peer.close()
+
+    run(test, log)
+
+
+def test_several_error_frames_then_4001_with_a_slow_reader_raise_the_last_reason(client: EtaClient, log: Log) -> None:
+    async def test(ws: MockStream) -> None:
+        ws.before_ready[1] = [{"type": "error", "err": "json"}, {"type": "error", "err": "type"}]
+        ws.refuse[1] = (4001, {"err": "bad key"})
+        stream = make(client, ws, AsyncSleeps(), connect_options={"open_timeout": 0.2})
+        it = stream.__aiter__()
+        frames = [await it.__anext__()]
+        await asyncio.sleep(0.4)  # the reader is busy past the deadline; the other frames and the close are already in
+        with pytest.raises(EtaError) as caught:
+            while True:
+                frames.append(await asyncio.wait_for(it.__anext__(), timeout=3))
+        assert [f["err"] for f in frames] == ["json", "type", "bad key"], "every frame before the close comes through"
+        assert (caught.value.code, caught.value.err) == (4001, "bad key")
+        assert ws.connections == 1
+
+    run(test, log)

@@ -307,11 +307,15 @@ class EtaStream:
 
 
 def _has_close(ws: Any) -> bool:
-    """The connection has had a close, from the server or from this side."""
+    """The server's close came in, or the connection is fully closed.
+
+    Not CLOSING: our own close() puts the socket there, and a peer that answers nothing would then hold that close for
+    websockets' close_timeout. The watchdog must still abort that socket.
+    """
     protocol = getattr(ws, "protocol", None)
     if getattr(protocol, "close_rcvd", None) is not None:
         return True
-    return getattr(getattr(protocol, "state", None), "name", "OPEN") in ("CLOSING", "CLOSED")
+    return getattr(getattr(protocol, "state", None), "name", "OPEN") == "CLOSED"
 
 
 def _open_timeout(value: Any, name: str) -> Optional[float]:

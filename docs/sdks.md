@@ -172,7 +172,7 @@ The SDK does what [Live updates](stream.md) asks of a bot:
 
 * It sends your key in the first frame, never in the URL.
 * It pings every 30 seconds.
-* If the stream hasn't opened and had the `ready` frame within 10 seconds, it gives up on that socket and connects again at once. Python aborts the old socket, and so does TypeScript with the `ws` package. Node.js's built-in `WebSocket` can't abort a socket: it closes the old one in the background, and a peer that never answers can keep it open, and keep your script from exiting, for a long time. To turn the deadline off, pass `open_timeout=None` in Python or `openTimeoutMs: null` in TypeScript.
+* If the stream hasn't opened and had the `ready` frame within 10 seconds, it gives up on that socket and connects again after the usual wait: 1 second, then 2, then 4, up to a minute. Python aborts the old socket, and so does TypeScript with the `ws` package. Node.js's built-in `WebSocket` can't abort a socket: it closes the old one in the background, and a peer that never answers can keep it open, and keep your script from exiting, for a long time. To turn the deadline off, pass `open_timeout=None` in Python or `openTimeoutMs: null` in TypeScript.
 * When the stream closes, it connects again after 1 second, then 2, then 4, up to a minute. It reads [`GET /me`](read/me.md) to catch up, then subscribes again.
 * After `4029`, it waits the `retryAfter` eta gives.
 * After `4001`, it stops for good: the key doesn't open. You get an `EtaError` with `code` 4001.

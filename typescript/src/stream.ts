@@ -345,6 +345,7 @@ export class EtaStream implements AsyncIterable<Frame> {
   }
 
   async #reconnectAfter(ms: number): Promise<void> {
+    if (this.#closed) return; // a closed handler called close(): no wait, and no timer left behind
     // close() ends the wait at once, and clears the default timer, so a script that closes the stream can exit at once
     await new Promise<void>((done) => {
       let timer: ReturnType<typeof setTimeout> | undefined;

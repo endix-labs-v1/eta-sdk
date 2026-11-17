@@ -275,7 +275,7 @@ class MockStream:
         self.handshake_delay = 0.0
         """Seconds the server waits before it answers the WebSocket upgrade."""
         self.before_ready: Dict[int, List[Dict[str, Any]]] = {}
-        """Connection number -> frames sent after its auth frame, just before ready."""
+        """Connection number -> frames sent after its auth frame, just before its answer (ready, or a refusal)."""
         self._server: Any = None
 
     async def start(self) -> "MockStream":
@@ -318,6 +318,8 @@ class MockStream:
                 if n in self.silent:
                     continue
                 if n in self.refuse:
+                    for early in self.before_ready.get(n, []):
+                        await ws.send(json.dumps(early))
                     code, err = self.refuse[n]
                     await ws.send(json.dumps({"type": "error", **err}))
                     await ws.close(code, err["err"])

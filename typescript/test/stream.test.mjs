@@ -499,3 +499,36 @@ test("with the ws package, a timed-out socket is destroyed at once", async () =>
     await new Promise((ok) => mute.close(ok));
   }
 });
+
+// ---------- Claude review of 21927c8 on PR #1 ----------
+
+test("close() in a closed handler leaves no backoff timer armed", async () => {
+  const realSet = globalThis.setTimeout;
+  const realClear = globalThis.clearTimeout;
+  const backoffs = [];
+  const cleared = new Set();
+  globalThis.setTimeout = (fn, ms, ...rest) => {
+    const t = realSet(fn, ms, ...rest);
+    if (ms === 3000) backoffs.push(t);
+    return t;
+  };
+  globalThis.clearTimeout = (t) => {
+    cleared.add(t);
+    return realClear(t);
+  };
+  try {
+    Manual.made = [];
+    const stream = eta.stream({ WebSocket: Manual, openTimeoutMs: 50, backoffMs: 3000 }); // a socket that never opens
+    let closed = 0;
+    stream.on("closed", () => {
+      closed++;
+      stream.close();
+    });
+    await waitUntil(() => closed === 1);
+    await new Promise((ok) => realSet(ok, 20));
+    assert.deepEqual(backoffs.filter((t) => !cleared.has(t)).length, 0, "no 3 s backoff timer left armed after close()");
+  } finally {
+    globalThis.setTimeout = realSet;
+    globalThis.clearTimeout = realClear;
+  }
+});

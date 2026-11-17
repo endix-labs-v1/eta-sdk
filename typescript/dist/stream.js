@@ -299,6 +299,8 @@ export class EtaStream {
         void this.#reconnectAfter(wait);
     }
     async #reconnectAfter(ms) {
+        if (this.#closed)
+            return; // a closed handler called close(): no wait, and no timer left behind
         // close() ends the wait at once, and clears the default timer, so a script that closes the stream can exit at once
         await new Promise((done) => {
             let timer;

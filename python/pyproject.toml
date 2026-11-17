@@ -21,7 +21,7 @@ classifiers = [
 ]
 dependencies = [
     "requests>=2.25",
-    "websockets>=13",
+    "websockets>=14.1",  # 14.1: frames that came before a close are still read (13.x and 14.0 drop them)
 ]
 
 [project.optional-dependencies]
