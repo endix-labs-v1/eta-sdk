@@ -1,0 +1,15 @@
+# Python
+python/.venv/
+python/.venv*/
+__pycache__/
+*.py[cod]
+*.egg-info/
+python/build/
+python/dist/
+.pytest_cache/
+
+# TypeScript: dist/ is committed on purpose (a git install gets it without a build)
+typescript/node_modules/
+typescript/*.tgz
+
+.DS_Store
