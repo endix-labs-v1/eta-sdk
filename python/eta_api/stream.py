@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable, Dict, Iterable, List, Optional
 from urllib.parse import urlsplit, urlunsplit
 
@@ -51,8 +52,9 @@ class EtaStream:
         ping_interval: Seconds between pings. 30 by default; eta closes a stream
             that sends nothing for 60.
         open_timeout: Seconds from connecting to eta's ``ready`` (the WebSocket
-            opens, eta answers the key). Past it, the stream drops and connects
-            again. 10 by default.
+            opens, eta answers the key). Past it, the stream drops the socket at
+            once and connects again. 10 by default; ``None`` for no deadline. An
+            ``open_timeout`` in ``connect_options`` takes its place.
         backoff: The first wait before connecting again, in seconds. 1 by default.
         max_backoff: The longest wait. 60 by default.
         resync: Read ``GET /me`` after each reconnect, when ``account`` is on. True by default.
@@ -68,7 +70,7 @@ class EtaStream:
         *,
         url: Optional[str] = None,
         ping_interval: float = 30.0,
-        open_timeout: float = 10.0,
+        open_timeout: Optional[float] = 10.0,
         backoff: float = 1.0,
         max_backoff: float = 60.0,
         resync: bool = True,
@@ -83,12 +85,15 @@ class EtaStream:
         self._channels: List[str] = wanted
         self._syms: Optional[List[str]] = list(syms) if syms is not None else None
         self.ping_interval = ping_interval
-        self.open_timeout = open_timeout
+        self.open_timeout = _open_timeout(open_timeout, "open_timeout")
         self.backoff = backoff
         self.max_backoff = max_backoff
         self.resync = resync
         self._sleep = sleep
         self._connect_options = dict(connect_options or {})
+        if "open_timeout" in self._connect_options:
+            self._connect_options["open_timeout"] = _open_timeout(self._connect_options["open_timeout"],
+                                                                  "connect_options open_timeout")
         self.handle: Optional[str] = None
         """Your handle, from the ``ready`` frame."""
         self._ws: Any = None
@@ -173,16 +178,21 @@ class EtaStream:
             reason = ""
             # one deadline from connecting to ready: connect's own open_timeout covers the WebSocket handshake, the watchdog the
             # wait for eta to answer the key (a server that opens and then says nothing would otherwise hold the stream for good)
-            deadline = loop.time() + float(options["open_timeout"])
+            limit = options["open_timeout"]
+            deadline = None if limit is None else loop.time() + limit
             timed_out: Dict[str, bool] = {}
             try:
                 async with connect(self.url, **options) as ws:
                     self._ws = ws
                     pinger: Optional["asyncio.Future[None]"] = None
-                    watchdog = asyncio.ensure_future(self._open_deadline(ws, deadline - loop.time(), timed_out))
+                    watchdog: Optional["asyncio.Future[None]"] = None
+                    if deadline is not None:
+                        watchdog = asyncio.ensure_future(self._open_deadline(ws, deadline - loop.time(), timed_out))
                     try:
                         await ws.send(json.dumps({"type": "auth", "key": self._client._key}))
                         async for raw in ws:
+                            if timed_out:
+                                break  # past the deadline: nothing more from this socket, a ready in its buffer included
                             frame = _frame(raw)
                             if frame is None:
                                 continue
@@ -195,7 +205,8 @@ class EtaStream:
                                 yield frame
                                 continue
                             # ready: the key opened. Catch up (after a drop), then subscribe.
-                            watchdog.cancel()
+                            if watchdog is not None:
+                                watchdog.cancel()
                             self.handle = frame.get("handle")
                             backoff = self.backoff
                             yield frame
@@ -217,7 +228,8 @@ class EtaStream:
                     finally:
                         self._live = False
                         self._ws = None
-                        watchdog.cancel()
+                        if watchdog is not None:
+                            watchdog.cancel()
                         if pinger is not None:
                             pinger.cancel()
                     code, reason = _close_of(ws)
@@ -227,8 +239,8 @@ class EtaStream:
                 code, reason = None, f"{type(exc).__name__}: {exc}"[:200]
                 if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
                     timed_out["yes"] = True
-            if timed_out:
-                code, dropped = None, "open timeout"
+            if timed_out:  # the deadline is why it dropped, whatever error frame came before it
+                code, dropped, last_error = None, "open timeout", None
 
             if self._closed:
                 return
@@ -253,13 +265,21 @@ class EtaStream:
         await ws.send(json.dumps(frame))
 
     async def _open_deadline(self, ws: Any, seconds: float, timed_out: Dict[str, bool]) -> None:
-        """Closes a connection that hasn't had ``ready`` by the deadline. Cancelled when ``ready`` comes."""
+        """Drops a connection that hasn't had ``ready`` by the deadline. Cancelled when ``ready`` comes.
+
+        It aborts the socket rather than closing it: a peer that answers nothing would hold a close for websockets'
+        ``close_timeout`` (10 more seconds) before the stream could connect again.
+        """
         try:
             await asyncio.sleep(max(seconds, 0.0))
         except asyncio.CancelledError:
             return
         timed_out["yes"] = True
-        await ws.close()
+        transport = getattr(ws, "transport", None)
+        if transport is not None:
+            transport.abort()
+        else:  # pragma: no cover - every websockets this package takes has the transport
+            await ws.close()
 
     async def _ping(self, ws: Any) -> None:
         try:
@@ -279,6 +299,15 @@ class EtaStream:
         finally:
             sleeper.cancel()
             stopper.cancel()
+
+
+def _open_timeout(value: Any, name: str) -> Optional[float]:
+    """Seconds above 0, or None (or infinity) for no deadline. 0 or below would drop every connection."""
+    if value is None or (isinstance(value, (int, float)) and not isinstance(value, bool) and value == math.inf):
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or math.isnan(value) or value <= 0:
+        raise ValueError(f"{name}: seconds above 0, or None for no deadline")
+    return float(value)
 
 
 def _channels(channels: Iterable[str], allow_empty: bool = False) -> List[str]:

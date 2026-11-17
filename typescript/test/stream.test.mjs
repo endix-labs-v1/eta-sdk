@@ -303,3 +303,77 @@ test("a stream that opens but never answers the key times out, then connects aga
   assert.deepEqual(frames, [{ type: "closed", code: null, err: "open timeout", wait: 1 }, { type: "ready", handle: "yourhandle" }]);
   assert.equal(api.connections, 2);
 });
+
+// ---------- Claude review of 605411c on PR #1 ----------
+
+test("openTimeoutMs null or Infinity means no deadline", async () => {
+  const quick = eta.stream({ openTimeoutMs: Infinity }); // Node runs a timer of Infinity ms after 1 ms
+  assert.deepEqual(types(await take(quick[Symbol.asyncIterator](), 3)), ["ready", "subscribed", "me"]);
+  quick.close();
+  api.silent.add(2);
+  const s = sleeps();
+  const none = eta.stream({ openTimeoutMs: null, sleep: s.sleep });
+  const closed = [];
+  none.on("closed", (f) => closed.push(f));
+  await waitUntil(() => api.received("auth").length === 2);
+  await new Promise((ok) => setTimeout(ok, 200));
+  assert.deepEqual(closed, [], "no deadline: a silent stream is not dropped");
+  none.close();
+});
+
+test("an openTimeoutMs of 0, below 0, NaN or past setTimeout's limit is refused", () => {
+  for (const bad of [0, -1, Number.NaN, 2 ** 31, "10"]) {
+    assert.throws(() => eta.stream({ openTimeoutMs: bad }), RangeError, String(bad));
+  }
+});
+
+test("a socket that opens after the deadline sends nothing and is closed", async () => {
+  // a passed-in WebSocket that never opens by itself, whose close() throws, and which the test opens late
+  const made = [];
+  class Late {
+    readyState = 0;
+    sent = [];
+    closes = 0;
+    onopen = null;
+    onmessage = null;
+    onclose = null;
+    onerror = null;
+    constructor() {
+      made.push(this);
+    }
+    send(data) {
+      this.sent.push(data);
+    }
+    close() {
+      this.closes++;
+      throw new Error("this socket can't close");
+    }
+  }
+  const s = sleeps();
+  const stream = eta.stream({ WebSocket: Late, openTimeoutMs: 50, sleep: s.sleep });
+  const closed = [];
+  stream.on("closed", (f) => {
+    closed.push(f);
+    stream.close();
+  });
+  await waitUntil(() => closed.length === 1);
+  const late = made[0];
+  late.readyState = 1;
+  late.onopen?.({});
+  assert.deepEqual(late.sent, [], "never the key on an abandoned socket");
+  assert.ok(late.closes >= 2, "closed again when it opens late");
+});
+
+test("a timed-out drop reports the open timeout, not an error frame that came before it", async () => {
+  api.silent.add(1);
+  const s = sleeps();
+  const stream = eta.stream({ openTimeoutMs: 100, sleep: s.sleep });
+  const frames = [];
+  stream.on("frame", (f) => frames.push(f));
+  stream.start();
+  await waitUntil(() => api.sockets.size === 1);
+  for (const ws of api.sockets) ws.send(JSON.stringify({ type: "error", err: "json" }));
+  await waitUntil(() => frames.some((f) => f.type === "closed"));
+  assert.deepEqual(frames.find((f) => f.type === "closed"), { type: "closed", code: null, err: "open timeout", wait: 1 });
+  stream.close();
+});

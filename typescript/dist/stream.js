@@ -69,7 +69,7 @@ export class EtaStream {
         this.#syms = options.syms ? [...options.syms] : null;
         this.url = options.url ?? streamUrl(client.baseUrl);
         this.#pingMs = options.pingMs ?? 30_000;
-        this.#openTimeoutMs = options.openTimeoutMs ?? 10_000;
+        this.#openTimeoutMs = openTimeoutOf(options.openTimeoutMs);
         this.#backoffMs = options.backoffMs ?? 1_000;
         this.#maxBackoffMs = options.maxBackoffMs ?? 60_000;
         this.#resync = options.resync ?? true;
@@ -201,20 +201,29 @@ export class EtaStream {
         this.#lastError = null;
         // a handshake that never answers (a lost SYN, a hung proxy, no ready to the key) may never fire onclose: drop it at the deadline
         this.#stopOpenTimer();
-        this.#openTimer = setTimeout(() => {
-            if (ws !== this.#ws)
-                return;
-            this.#dropReason = "open timeout";
-            ws.onclose = null; // the drop is reported here, once, with no close code (a socket closed while opening fires a close of its own)
-            ws.onmessage = null;
-            try {
-                ws.close();
-            }
-            catch {
-                // not open yet: dropping it below is enough
-            }
-            this.#dropped(ws, undefined, undefined);
-        }, this.#openTimeoutMs);
+        if (this.#openTimeoutMs !== null) {
+            this.#openTimer = setTimeout(() => {
+                if (ws !== this.#ws)
+                    return;
+                this.#lastError = null; // the deadline is why it drops, whatever error frame came before it
+                this.#dropReason = "open timeout";
+                // the drop is reported here, once, with no close code; the socket is abandoned: it never gets the key, and if it opens late
+                // it is closed (a socket closed while opening fires a close of its own, and a passed-in one may not close at all)
+                const shut = () => {
+                    try {
+                        ws.close();
+                    }
+                    catch {
+                        // not open yet, or a socket that can't close: it has no handlers left
+                    }
+                };
+                ws.onopen = shut;
+                ws.onclose = null;
+                ws.onmessage = null;
+                shut();
+                this.#dropped(ws, undefined, undefined);
+            }, this.#openTimeoutMs);
+        }
         ws.onopen = () => this.#send(ws, { type: "auth", key: this.#key });
         ws.onmessage = (event) => this.#message(ws, event.data);
         ws.onerror = () => undefined; // a close follows
@@ -358,6 +367,17 @@ function channelsOf(channels, allowEmpty = false) {
     if ((!list.length && !allowEmpty) || list.some((c) => !CHANNELS.includes(c)))
         throw new TypeError("channels: account, marks");
     return CHANNELS.filter((c) => list.includes(c));
+}
+/** setTimeout runs a delay past 2^31 - 1 ms, Infinity included, after 1 ms: so Infinity and null mean no deadline, and past that is refused. */
+function openTimeoutOf(value) {
+    if (value === undefined)
+        return 10_000;
+    if (value === null || value === Infinity)
+        return null;
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > 2_147_483_647) {
+        throw new RangeError("openTimeoutMs: milliseconds above 0, up to 2147483647, or null (or Infinity) for no deadline");
+    }
+    return value;
 }
 function streamUrl(baseUrl) {
     const u = new URL(baseUrl);

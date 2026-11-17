@@ -31,8 +31,8 @@ export interface StreamOptions {
     /** Milliseconds between pings. 30,000 by default; eta closes a stream that sends nothing for 60 seconds. */
     pingMs?: number;
     /** Milliseconds from connecting to eta's `ready` (the WebSocket opens, eta answers the key). Past it, the stream drops and connects
-     *  again. 10,000 by default. */
-    openTimeoutMs?: number;
+     *  again. 10,000 by default; `null` or `Infinity` for no deadline. */
+    openTimeoutMs?: number | null;
     /** The first wait before connecting again, in milliseconds. 1,000 by default. */
     backoffMs?: number;
     /** The longest wait. 60,000 by default. */

@@ -272,6 +272,8 @@ class MockStream:
         """The connections open now."""
         self.silent: set = set()
         """Connection numbers that open but never answer the auth frame."""
+        self.before_ready: Dict[int, List[Dict[str, Any]]] = {}
+        """Connection number -> frames sent after its auth frame, just before ready."""
         self._server: Any = None
 
     async def start(self) -> "MockStream":
@@ -318,6 +320,8 @@ class MockStream:
                     await ws.send(json.dumps({"type": "error", "err": "bad key"}))
                     await ws.close(4001, "bad key")
                     return
+                for early in self.before_ready.get(n, []):
+                    await ws.send(json.dumps(early))
                 await ws.send(json.dumps({"type": "ready", "handle": "yourhandle"}))
             elif kind == "subscribe":
                 channels = frame["channels"]

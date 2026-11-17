@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
+import math
+import time
 from typing import Any, Awaitable, Callable, Dict, List
 
 import pytest
@@ -330,5 +334,76 @@ def test_a_stream_that_opens_but_never_answers_the_key_times_out(client: EtaClie
                           {"type": "ready", "handle": "yourhandle"}]
         assert ws.connections == 2
         await stream.close()
+
+    run(test, log)
+
+
+# ---------- Claude review of 605411c on PR #1 ----------
+
+def test_open_timeout_none_means_no_deadline(client: EtaClient, log: Log) -> None:
+    async def test(ws: MockStream) -> None:
+        for options in ({"open_timeout": None}, {"connect_options": {"open_timeout": None}}, {"open_timeout": math.inf}):
+            stream = make(client, ws, AsyncSleeps(), **options)
+            frames = await asyncio.wait_for(take(stream.__aiter__(), 3), timeout=3)
+            assert [f["type"] for f in frames] == ["ready", "subscribed", "me"], options
+            await stream.close()
+
+    run(test, log)
+
+
+@pytest.mark.parametrize("options", [
+    {"open_timeout": 0}, {"open_timeout": -1}, {"open_timeout": math.nan}, {"open_timeout": "10"},
+    {"connect_options": {"open_timeout": 0}}, {"connect_options": {"open_timeout": -5}},
+], ids=["0", "negative", "nan", "text", "connect_options 0", "connect_options negative"])
+def test_an_open_timeout_of_0_or_below_is_refused(client: EtaClient, options: Dict[str, Any]) -> None:
+    with pytest.raises(ValueError, match="open_timeout"):
+        client.stream(**options)
+
+
+def test_a_ready_buffered_when_the_deadline_fires_is_not_yielded(client: EtaClient, log: Log) -> None:
+    async def test(ws: MockStream) -> None:
+        ws.before_ready[1] = [{"type": "error", "err": "json"}]  # error, then ready, both sent at once
+        stream = make(client, ws, AsyncSleeps(), connect_options={"open_timeout": 0.2})
+        it = stream.__aiter__()
+        first = await it.__anext__()
+        assert first == {"type": "error", "err": "json"}
+        await asyncio.sleep(0.4)  # the reader is busy past the deadline; ready waits in the buffer
+        frames = await asyncio.wait_for(take(it, 2), timeout=3)
+        assert frames == [{"type": "closed", "code": None, "err": "open timeout", "wait": 1.0},
+                          {"type": "ready", "handle": "yourhandle"}], "nothing from the timed-out socket"
+        assert ws.connections == 2
+        await stream.close()
+
+    run(test, log)
+
+
+def test_a_peer_that_answers_nothing_is_dropped_at_the_deadline(client: EtaClient, log: Log) -> None:
+    async def test(_: MockStream) -> None:
+        held: List[Any] = []
+
+        async def mute(reader: Any, writer: Any) -> None:
+            # completes the WebSocket upgrade, then answers nothing: not the key, not the close
+            request = await reader.readuntil(b"\r\n\r\n")
+            key = [line.split(b":", 1)[1].strip() for line in request.split(b"\r\n") if line.lower().startswith(b"sec-websocket-key:")][0]
+            accept = base64.b64encode(hashlib.sha1(key + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest())
+            writer.write(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                         b"Sec-WebSocket-Accept: " + accept + b"\r\n\r\n")
+            held.append(writer)
+            await asyncio.sleep(30)
+
+        peer = await asyncio.start_server(mute, "127.0.0.1", 0)
+        port = peer.sockets[0].getsockname()[1]
+        try:
+            stream = client.stream(url=f"ws://127.0.0.1:{port}/stream", sleep=AsyncSleeps(), connect_options={"open_timeout": 0.3})
+            started = time.monotonic()
+            frame = await asyncio.wait_for(stream.__aiter__().__anext__(), timeout=3)
+            took = time.monotonic() - started
+            assert frame == {"type": "closed", "code": None, "err": "open timeout", "wait": 1.0}
+            assert took < 1.0, f"dropped at the deadline, not after a close handshake: took {took:.1f} s"
+            await stream.close()
+        finally:
+            for w in held:
+                w.close()
+            peer.close()
 
     run(test, log)
