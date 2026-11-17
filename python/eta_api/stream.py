@@ -343,9 +343,8 @@ def _stream_url(base_url: str) -> str:
 
 
 def _close_of(ws: Any) -> Any:
-    """The close code and reason. websockets 14.1 and later have them on the connection; 13.x and 14.0 on its protocol."""
-    holder = ws if hasattr(ws, "close_code") else getattr(ws, "protocol", None)
-    return getattr(holder, "close_code", None), getattr(holder, "close_reason", None) or ""
+    """The close code and reason, from the connection (websockets 14.1 and later, the floor in pyproject.toml)."""
+    return getattr(ws, "close_code", None), getattr(ws, "close_reason", None) or ""
 
 
 def _frame(raw: Any) -> Optional[Dict[str, Any]]:
