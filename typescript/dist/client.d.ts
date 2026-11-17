@@ -33,7 +33,7 @@ export declare function newClientId(): string;
 /**
  * A client for the eta API, built from one API key.
  *
- * Every route a key can call has a method. Each answer is the JSON eta sends. A refused call throws {@link EtaError}.
+ * Every call in the Read, Post, Creator and Trade parts of the API reference has a method. Each answer is the JSON eta sends. A refused call throws {@link EtaError}.
  */
 export declare class EtaClient {
     #private;

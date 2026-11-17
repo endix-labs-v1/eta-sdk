@@ -67,7 +67,8 @@ the API's OpenAPI spec.
 
 ## The methods
 
-Every route a key can call has a method. Keys and sessions are not in the SDKs: you make and revoke keys from a signed-in
+Every call in the Read, Post, Creator and Trade parts of the API reference has a method, and so does the live stream.
+Keys and sessions are not in the SDKs: you make and revoke keys from a signed-in
 session, in the app or with `POST /keys`.
 
 | What | Python | TypeScript |
@@ -122,8 +123,9 @@ A refused call raises (Python) or throws (TypeScript) an `EtaError`:
 ```python
 from eta_api import EtaError
 
+fresh = eta.quote("HYPE", "buy", 25)  # a quote is good for one order only
 try:
-    eta.order("HYPE", "buy", 25, quote_id=quote["quoteId"], max_slippage_pct=1)
+    eta.order("HYPE", "buy", 25, quote_id=fresh["quoteId"], max_slippage_pct=1)
 except EtaError as e:
     if e.err == "price moved":
         print("Now", e.fields["price"], "quoted", e.fields["quoted"])
@@ -132,8 +134,8 @@ except EtaError as e:
 ```
 
 A `429 too fast` is not an error you see at first. The client waits the `retryAfter` seconds the answer gives and sends the
-call again, up to 3 times (`rate_limit_retries` / `rateLimitRetries`). It never waits longer than 60 seconds for one call
-(`rate_limit_max_wait` / `rateLimitMaxWaitMs`); a longer wait raises the 429 with `retry_after` / `retryAfter`.
+call again, up to 3 times (`rate_limit_retries` / `rateLimitRetries`). It waits at most 60 seconds each time
+(`rate_limit_max_wait` / `rateLimitMaxWaitMs`); a longer `retryAfter` raises the 429 with `retry_after` / `retryAfter`.
 
 The newest `X-RateLimit-*` values are on the client: `eta.rate_limit` in Python (a `RateLimit` with `limit`, `remaining`
 and `reset`), `eta.rateLimit` in TypeScript. `None` / `null` until the first answer that has them. A key may make 30
@@ -180,13 +182,13 @@ What it does for you:
 - It pings every 30 seconds. eta closes a stream that sends nothing for 60.
 - If the stream hasn't opened and had eta's `ready` within 10 seconds (`open_timeout` / `openTimeoutMs`), it gives
   up on that socket and connects again after the same wait as any drop: 1 second, then 2, 4, up to a minute. A
-  handshake that never answers can't hold it for good. Python aborts the old socket, and so does TypeScript with the `ws` package. Node's built-in `WebSocket` has
+  handshake that never answers can't hold it for good. Python aborts the old socket, and so does TypeScript when you pass `WebSocket` from `ws` (`eta.stream({ WebSocket, ... })`). Node's built-in `WebSocket` has
   no way to abort a socket, so there the old one is closed in the background: a peer that never answers can keep it
-  open, and keep a script from exiting, for a long time. Pass `WebSocket` from `ws` if that matters.
+  open, and keep a script from exiting, for a long time.
   `open_timeout=None` in Python, or `openTimeoutMs: null` in TypeScript, turns the deadline off. 0 and below are
   refused.
-- When the stream drops, it connects again after 1 second, then 2, 4, up to a minute. It reads `GET /me` to catch up, as a
-  `resync` frame, then subscribes again. A stream doesn't replay what happened while it was closed.
+- When the stream drops, it connects again after 1 second, then 2, 4, up to a minute. With the `account` channel on, it reads `GET /me` to catch up, as a
+  `resync` frame. Then it subscribes again. A stream doesn't replay what happened while it was closed.
 - On close 4029 (too fast, or too many streams) it waits the `retryAfter` eta gives.
 - On close 4001 (a bad or revoked key, or a session token) it stops for good: the iteration raises `EtaError` with
   `code` 4001, and TypeScript's `end` handlers get it.

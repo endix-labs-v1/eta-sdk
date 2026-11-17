@@ -5,6 +5,14 @@ import type { Channel, Frame } from "./types.js";
 export declare const CLOSE_KEY = 4001;
 /** Too fast, or too many streams. The stream waits `retryAfter` when eta gives one. */
 export declare const CLOSE_LIMIT = 4029;
+/**
+ * A handler the stream sets on a socket. It is written as a method, which TypeScript checks both ways, so a socket class whose
+ * handlers take a narrower event (ws's `WebSocket.Event`, the DOM's `Event`) still fits under `strict`. A plain function type
+ * would be checked one way only (strictFunctionTypes) and refuse both.
+ */
+type WebSocketHandler<E> = {
+    handle(event: E): void;
+}["handle"];
 /** What the stream needs of a WebSocket: the global one (Node 22+, browsers) and the `ws` package both fit. */
 export interface WebSocketLike {
     readonly readyState: number;
@@ -12,15 +20,15 @@ export interface WebSocketLike {
     close(code?: number, reason?: string): void;
     /** Destroys the socket at once, with no close handshake. The `ws` package has it; the global WebSocket doesn't. */
     terminate?(): void;
-    onopen: ((event: unknown) => void) | null;
-    onmessage: ((event: {
+    onopen: WebSocketHandler<unknown> | null;
+    onmessage: WebSocketHandler<{
         data: unknown;
-    }) => void) | null;
-    onclose: ((event: {
+    }> | null;
+    onclose: WebSocketHandler<{
         code: number;
         reason: string;
-    }) => void) | null;
-    onerror: ((event: unknown) => void) | null;
+    }> | null;
+    onerror: WebSocketHandler<unknown> | null;
 }
 export type WebSocketConstructor = new (url: string) => WebSocketLike;
 export interface StreamOptions {

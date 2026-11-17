@@ -1,6 +1,7 @@
 // Type-level checks of the built .d.ts files (npm run typecheck): each line compiles as a user would write it, and the lines
 // marked to expect an error must stay errors. Never run.
 import { EtaClient, EtaError, newClientId, type Frame, type Me, type OrderAnswer, type Quote } from "../dist/index.js";
+import WsWebSocket from "ws";
 
 async function usage(): Promise<void> {
   const eta = new EtaClient({ key: "eta_...", baseUrl: "https://api.eta.cash", timeoutMs: 10_000 });
@@ -60,6 +61,17 @@ async function usage(): Promise<void> {
       const wait: number = frame.wait;
     }
   }
+
+  // the WebSocket option takes the ws package's class (typed by @types/ws) and the DOM's global WebSocket, as they are
+  eta.stream({ WebSocket: WsWebSocket });
+  eta.stream({ channels: ["account"], WebSocket: WsWebSocket, openTimeoutMs: 5_000 });
+  eta.stream({ WebSocket: WebSocket });
+  eta.stream({ WebSocket: globalThis.WebSocket });
+  class NotASocket {
+    constructor(readonly url: string) {}
+  }
+  // @ts-expect-error a class that is no WebSocket is still refused
+  eta.stream({ WebSocket: NotASocket });
 
   // @ts-expect-error a side eta doesn't have
   await eta.order({ sym: "HYPE", side: "up", usd: 1 });
