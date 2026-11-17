@@ -1,0 +1,40 @@
+{
+  "//": "For git installs only: npm install github:endix-labs-v1/eta-sdk. The package lives in typescript/ and is published from there. npm 11 can't install a git subdirectory (it drops #path: from the resolved URL), so this file points a git install at typescript/dist. Keep name, version, engines and the dependencies in step with typescript/package.json; typescript/test/package.test.mjs checks it.",
+  "name": "eta-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The eta API for TypeScript and JavaScript: read, post, run your narratives and trade by code.",
+  "license": "MIT",
+  "author": "eta",
+  "type": "module",
+  "main": "./typescript/dist/index.js",
+  "types": "./typescript/dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./typescript/dist/index.d.ts",
+      "import": "./typescript/dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "typescript/dist",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "peerDependencies": {
+    "ws": ">=8"
+  },
+  "peerDependenciesMeta": {
+    "ws": {
+      "optional": true
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/endix-labs-v1/eta-sdk.git"
+  },
+  "homepage": "https://eta-cash.gitbook.io/api/"
+}

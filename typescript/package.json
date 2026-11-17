@@ -1,0 +1,57 @@
+{
+  "name": "eta-api",
+  "version": "0.1.0",
+  "description": "The eta API for TypeScript and JavaScript: read, post, run your narratives and trade by code.",
+  "license": "MIT",
+  "author": "eta",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "compile": "rm -rf dist && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p test/tsconfig.json",
+    "test": "npm run compile && npm run typecheck && node --import ./test/net-guard.mjs --test --test-timeout=20000 test/*.test.mjs",
+    "prepublishOnly": "npm test"
+  },
+  "peerDependencies": {
+    "ws": ">=8"
+  },
+  "peerDependenciesMeta": {
+    "ws": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "ws": "^8.23.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/endix-labs-v1/eta-sdk.git",
+    "directory": "typescript"
+  },
+  "homepage": "https://eta-cash.gitbook.io/api/",
+  "keywords": [
+    "eta",
+    "trading",
+    "api",
+    "sdk",
+    "narratives"
+  ]
+}
