@@ -1,6 +1,6 @@
 # SDKs for Python and TypeScript
 
-eta has official SDKs in Python and in TypeScript. Each one is a client built from one of your [API keys](keys/create.md), with a method for every route a key can call. They send your key, read the answers, and do the careful parts for you: safe retries of orders, waits on `429`, and a stream that connects again by itself.
+eta has official SDKs in Python and in TypeScript. Each one is a client built from one of your [API keys](keys/create.md), with a method for every route in this API reference. They send your key, read the answers, and do the careful parts for you: safe retries of orders, waits on `429`, and a stream that connects again by itself.
 
 The SDKs call the same routes as the rest of these pages, and go through the same checks.
 
@@ -102,8 +102,9 @@ A refused call raises (Python) or throws (TypeScript) an `EtaError`. It carries:
 ```python
 from eta_api import EtaError
 
+fresh = eta.quote("HYPE", "buy", 25)  # a quote is good for one order only
 try:
-    eta.order("HYPE", "buy", 25, quote_id=quote["quoteId"], max_slippage_pct=1)
+    eta.order("HYPE", "buy", 25, quote_id=fresh["quoteId"], max_slippage_pct=1)
 except EtaError as e:
     if e.err == "price moved":
         print("Now", e.fields["price"], "quoted", e.fields["quoted"])
@@ -116,8 +117,9 @@ except EtaError as e:
 ```typescript
 import { EtaError } from "eta-api";
 
+const fresh = await eta.quote({ sym: "HYPE", side: "buy", usd: 25 }); // a quote is good for one order only
 try {
-  await eta.order({ sym: "HYPE", side: "buy", usd: 25, quoteId: quote.quoteId, maxSlippagePct: 1 });
+  await eta.order({ sym: "HYPE", side: "buy", usd: 25, quoteId: fresh.quoteId, maxSlippagePct: 1 });
 } catch (e) {
   if (e instanceof EtaError && e.err === "price moved") console.log("Now", e.fields.price, "quoted", e.fields.quoted);
   else if (e instanceof EtaError) console.log(e.status, e.err, e.requestId);
@@ -129,7 +131,7 @@ try {
 
 ## Rate limits
 
-On a `429`, the SDK waits the `retryAfter` seconds the answer gives, then sends the call again. It does this up to 3 times, and never waits more than 60 seconds for one call. Past that, it raises the `429`. You can change both numbers when you make the client.
+On a `429`, the SDK waits the `retryAfter` seconds the answer gives, then sends the call again. It does this up to 3 times, and waits at most 60 seconds each time. A `retryAfter` longer than that, or a fourth `429`, is raised. You can change both numbers when you make the client.
 
 The newest rate-limit headers are on the client: `eta.rate_limit` in Python, `eta.rateLimit` in TypeScript. Each has `limit`, `remaining` and `reset`, as in [Rate-limit headers](errors-and-limits.md#rate-limit-headers).
 
@@ -172,12 +174,12 @@ The SDK does what [Live updates](stream.md) asks of a bot:
 
 * It sends your key in the first frame, never in the URL.
 * It pings every 30 seconds.
-* If the stream hasn't opened and had the `ready` frame within 10 seconds, it gives up on that socket and connects again after the usual wait: 1 second, then 2, then 4, up to a minute. Python aborts the old socket, and so does TypeScript with the `ws` package. Node.js's built-in `WebSocket` can't abort a socket: it closes the old one in the background, and a peer that never answers can keep it open, and keep your script from exiting, for a long time. To turn the deadline off, pass `open_timeout=None` in Python or `openTimeoutMs: null` in TypeScript.
-* When the stream closes, it connects again after 1 second, then 2, then 4, up to a minute. It reads [`GET /me`](read/me.md) to catch up, then subscribes again.
+* If the stream hasn't opened and had the `ready` frame within 10 seconds, it gives up on that socket and connects again after the usual wait: 1 second, then 2, then 4, up to a minute. Python aborts the old socket, and so does TypeScript when you pass `WebSocket` from the `ws` package: `eta.stream({ WebSocket, ... })`. Node.js's built-in `WebSocket` can't abort a socket: it closes the old one in the background, and a peer that never answers can keep it open, and keep your script from exiting, for a long time. To turn the deadline off, pass `open_timeout=None` in Python or `openTimeoutMs: null` in TypeScript.
+* When the stream closes, it connects again after 1 second, then 2, then 4, up to a minute, and subscribes again. With the `account` channel on, it first reads [`GET /me`](read/me.md) to catch up.
 * After `4029`, it waits the `retryAfter` eta gives.
 * After `4001`, it stops for good: the key doesn't open. You get an `EtaError` with `code` 4001.
 
-Besides eta's frames, the SDK gives two of its own. `resync` has your record from `GET /me` after it connects again. `closed` has the close `code`, the `err` and the seconds it `wait`s before it connects again.
+Besides eta's frames, the SDK gives two of its own. `resync` has your record from `GET /me` after it connects again, when the `account` channel is on. `closed` has the close `code`, the `err` and the seconds it `wait`s before it connects again.
 
 ## Source
 
